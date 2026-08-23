@@ -1,0 +1,62 @@
+[2026-08-23T13:47:03.979+0000] {local_task_job_runner.py:120} INFO - ::group::Pre task execution logs
+[2026-08-23T13:47:04.085+0000] {taskinstance.py:2076} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: earthquake_medallion_pipeline.ensure_schema scheduled__2026-08-23T12:00:00+00:00 [queued]>
+[2026-08-23T13:47:04.091+0000] {taskinstance.py:2076} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: earthquake_medallion_pipeline.ensure_schema scheduled__2026-08-23T12:00:00+00:00 [queued]>
+[2026-08-23T13:47:04.092+0000] {taskinstance.py:2306} INFO - Starting attempt 2 of 4
+[2026-08-23T13:47:04.104+0000] {taskinstance.py:2330} INFO - Executing <Task(_PythonDecoratedOperator): ensure_schema> on 2026-08-23 12:00:00+00:00
+[2026-08-23T13:47:04.108+0000] {standard_task_runner.py:64} INFO - Started process 2992 to run task
+[2026-08-23T13:47:04.110+0000] {standard_task_runner.py:90} INFO - Running: ['***', 'tasks', 'run', 'earthquake_medallion_pipeline', 'ensure_schema', 'scheduled__2026-08-23T12:00:00+00:00', '--job-id', '4', '--raw', '--subdir', 'DAGS_FOLDER/earthquake_medallion_pipeline.py', '--cfg-path', '/tmp/tmp89s7y5xy']
+[2026-08-23T13:47:04.113+0000] {standard_task_runner.py:91} INFO - Job 4: Subtask ensure_schema
+[2026-08-23T13:47:04.202+0000] {task_command.py:426} INFO - Running <TaskInstance: earthquake_medallion_pipeline.ensure_schema scheduled__2026-08-23T12:00:00+00:00 [running]> on host LAPTOP-6BTBCN71.localdomain
+[2026-08-23T13:47:04.319+0000] {taskinstance.py:2648} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='data-engineering' AIRFLOW_CTX_DAG_ID='earthquake_medallion_pipeline' AIRFLOW_CTX_TASK_ID='ensure_schema' AIRFLOW_CTX_EXECUTION_DATE='2026-08-23T12:00:00+00:00' AIRFLOW_CTX_TRY_NUMBER='2' AIRFLOW_CTX_DAG_RUN_ID='scheduled__2026-08-23T12:00:00+00:00'
+[2026-08-23T13:47:04.320+0000] {taskinstance.py:430} INFO - ::endgroup::
+[2026-08-23T13:47:04.721+0000] {db.py:42} INFO - Running SQL file: /mnt/c/Users/agnes/earthquake_etl/sql/01_create_bronze.sql
+[2026-08-23T13:47:04.733+0000] {taskinstance.py:441} INFO - ::group::Post task execution logs
+[2026-08-23T13:47:04.745+0000] {taskinstance.py:2905} ERROR - Task failed with exception
+Traceback (most recent call last):
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/models/taskinstance.py", line 465, in _execute_task
+    result = _execute_callable(context=context, **execute_callable_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/models/taskinstance.py", line 432, in _execute_callable
+    return execute_callable(context=context, **execute_callable_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/models/baseoperator.py", line 401, in wrapper
+    return func(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/decorators/base.py", line 265, in execute
+    return_value = super().execute(context)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/models/baseoperator.py", line 401, in wrapper
+    return func(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/operators/python.py", line 235, in execute
+    return_value = self.execute_callable()
+                   ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/operators/python.py", line 252, in execute_callable
+    return self.python_callable(*self.op_args, **self.op_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/dags/earthquake_medallion_pipeline.py", line 88, in ensure_schema
+    run_sql_file(f"{SQL_DIR}/{filename}")
+  File "/mnt/c/Users/agnes/earthquake_etl/include/db.py", line 43, in run_sql_file
+    hook.run(sql)
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/providers/common/sql/hooks/sql.py", line 438, in run
+    with self._create_autocommit_connection(autocommit) as conn:
+  File "/usr/lib/python3.11/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/providers/common/sql/hooks/sql.py", line 560, in _create_autocommit_connection
+    with closing(self.get_conn()) as conn:
+                 ^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/providers/postgres/hooks/postgres.py", line 145, in get_conn
+    conn = deepcopy(self.connection or self.get_connection(conn_id))
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/hooks/base.py", line 83, in get_connection
+    conn = Connection.get_connection_from_secrets(conn_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages/airflow/models/connection.py", line 519, in get_connection_from_secrets
+    raise AirflowNotFoundException(f"The conn_id `{conn_id}` isn't defined")
+airflow.exceptions.AirflowNotFoundException: The conn_id `analytics_db` isn't defined
+[2026-08-23T13:47:04.851+0000] {taskinstance.py:1206} INFO - Marking task as UP_FOR_RETRY. dag_id=earthquake_medallion_pipeline, task_id=ensure_schema, run_id=scheduled__2026-08-23T12:00:00+00:00, execution_date=20260823T120000, start_date=20260823T134704, end_date=20260823T134704
+[2026-08-23T13:47:04.865+0000] {standard_task_runner.py:110} ERROR - Failed to execute job 4 for task ensure_schema (The conn_id `analytics_db` isn't defined; 2992)
+[2026-08-23T13:47:04.886+0000] {local_task_job_runner.py:243} INFO - Task exited with return code 1
+[2026-08-23T13:47:04.913+0000] {taskinstance.py:3503} INFO - 0 downstream tasks scheduled from follow-on schedule check
+[2026-08-23T13:47:04.918+0000] {local_task_job_runner.py:222} INFO - ::endgroup::

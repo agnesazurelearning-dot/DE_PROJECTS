@@ -1,0 +1,19 @@
+[2026-08-23T15:00:10.322+0000] {local_task_job_runner.py:120} INFO - ::group::Pre task execution logs
+[2026-08-23T15:00:10.415+0000] {taskinstance.py:2076} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: earthquake_medallion_pipeline.build_gold scheduled__2026-08-23T14:00:00+00:00 [queued]>
+[2026-08-23T15:00:10.421+0000] {taskinstance.py:2076} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: earthquake_medallion_pipeline.build_gold scheduled__2026-08-23T14:00:00+00:00 [queued]>
+[2026-08-23T15:00:10.423+0000] {taskinstance.py:2306} INFO - Starting attempt 1 of 4
+[2026-08-23T15:00:10.433+0000] {taskinstance.py:2330} INFO - Executing <Task(_PythonDecoratedOperator): build_gold> on 2026-08-23 14:00:00+00:00
+[2026-08-23T15:00:10.437+0000] {standard_task_runner.py:64} INFO - Started process 4628 to run task
+[2026-08-23T15:00:10.438+0000] {standard_task_runner.py:90} INFO - Running: ['***', 'tasks', 'run', 'earthquake_medallion_pipeline', 'build_gold', 'scheduled__2026-08-23T14:00:00+00:00', '--job-id', '19', '--raw', '--subdir', 'DAGS_FOLDER/earthquake_medallion_pipeline.py', '--cfg-path', '/tmp/tmpg03aa9_h']
+[2026-08-23T15:00:10.441+0000] {standard_task_runner.py:91} INFO - Job 19: Subtask build_gold
+[2026-08-23T15:00:10.498+0000] {task_command.py:426} INFO - Running <TaskInstance: earthquake_medallion_pipeline.build_gold scheduled__2026-08-23T14:00:00+00:00 [running]> on host LAPTOP-6BTBCN71.localdomain
+[2026-08-23T15:00:10.608+0000] {taskinstance.py:2648} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='data-engineering' AIRFLOW_CTX_DAG_ID='earthquake_medallion_pipeline' AIRFLOW_CTX_TASK_ID='build_gold' AIRFLOW_CTX_EXECUTION_DATE='2026-08-23T14:00:00+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='scheduled__2026-08-23T14:00:00+00:00'
+[2026-08-23T15:00:10.609+0000] {taskinstance.py:430} INFO - ::endgroup::
+[2026-08-23T15:00:10.944+0000] {base.py:84} INFO - Using connection ID '***_db' for task execution.
+[2026-08-23T15:00:10.959+0000] {earthquake_medallion_pipeline.py:219} INFO - Gold layer rebuilt for window=2026-08-23 14:00:00+00:00..2026-08-23 15:00:00+00:00
+[2026-08-23T15:00:10.960+0000] {python.py:237} INFO - Done. Returned value was: {'batch_id': 'scheduled__2026-08-23T14:00:00+00:00', 'status': 'gold_complete'}
+[2026-08-23T15:00:10.962+0000] {taskinstance.py:441} INFO - ::group::Post task execution logs
+[2026-08-23T15:00:10.987+0000] {taskinstance.py:1206} INFO - Marking task as SUCCESS. dag_id=earthquake_medallion_pipeline, task_id=build_gold, run_id=scheduled__2026-08-23T14:00:00+00:00, execution_date=20260823T140000, start_date=20260823T150010, end_date=20260823T150010
+[2026-08-23T15:00:11.013+0000] {local_task_job_runner.py:243} INFO - Task exited with return code 0
+[2026-08-23T15:00:11.033+0000] {taskinstance.py:3503} INFO - 1 downstream tasks scheduled from follow-on schedule check
+[2026-08-23T15:00:11.036+0000] {local_task_job_runner.py:222} INFO - ::endgroup::

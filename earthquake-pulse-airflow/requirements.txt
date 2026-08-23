@@ -1,0 +1,16 @@
+# Only two packages, both genuinely imported by this project's code (bare
+# `apache-airflow` doesn't ship either):
+#   apache-airflow-providers-postgres -- include/db.py: PostgresHook
+#   requests                          -- include/usgs_client.py: calling the USGS API
+#
+# Pinned to the EXACT versions in Airflow 2.9.3's official constraints file
+# for Python 3.11 (https://raw.githubusercontent.com/apache/airflow/constraints-2.9.3/constraints-3.11.txt).
+# Installing a *different* version than what apache-airflow 2.9.3 itself
+# depends on sends pip's resolver into exhaustive backtracking trying to
+# reconcile the conflict -- which can spin for a very long time instead of
+# failing fast. Matching the constraints file exactly avoids that. Always
+# install with `--constraint <that same URL>` (see README) even though
+# these are already pinned -- that's what makes the whole resolution a
+# single fast pass instead of two separate ones.
+apache-airflow-providers-postgres==5.11.2
+requests==2.31.0

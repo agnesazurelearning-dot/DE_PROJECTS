@@ -1,0 +1,190 @@
+[2026-08-23T15:00:00.765+0000] {local_task_job_runner.py:120} INFO - ::group::Pre task execution logs
+[2026-08-23T15:00:00.876+0000] {taskinstance.py:2076} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: earthquake_medallion_pipeline.ensure_schema scheduled__2026-08-23T14:00:00+00:00 [queued]>
+[2026-08-23T15:00:00.884+0000] {taskinstance.py:2076} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: earthquake_medallion_pipeline.ensure_schema scheduled__2026-08-23T14:00:00+00:00 [queued]>
+[2026-08-23T15:00:00.885+0000] {taskinstance.py:2306} INFO - Starting attempt 1 of 4
+[2026-08-23T15:00:00.897+0000] {taskinstance.py:2330} INFO - Executing <Task(_PythonDecoratedOperator): ensure_schema> on 2026-08-23 14:00:00+00:00
+[2026-08-23T15:00:00.901+0000] {standard_task_runner.py:64} INFO - Started process 4554 to run task
+[2026-08-23T15:00:00.903+0000] {standard_task_runner.py:90} INFO - Running: ['***', 'tasks', 'run', 'earthquake_medallion_pipeline', 'ensure_schema', 'scheduled__2026-08-23T14:00:00+00:00', '--job-id', '16', '--raw', '--subdir', 'DAGS_FOLDER/earthquake_medallion_pipeline.py', '--cfg-path', '/tmp/tmp2wuhkrcd']
+[2026-08-23T15:00:00.906+0000] {standard_task_runner.py:91} INFO - Job 16: Subtask ensure_schema
+[2026-08-23T15:00:00.968+0000] {task_command.py:426} INFO - Running <TaskInstance: earthquake_medallion_pipeline.ensure_schema scheduled__2026-08-23T14:00:00+00:00 [running]> on host LAPTOP-6BTBCN71.localdomain
+[2026-08-23T15:00:01.071+0000] {taskinstance.py:2648} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='data-engineering' AIRFLOW_CTX_DAG_ID='earthquake_medallion_pipeline' AIRFLOW_CTX_TASK_ID='ensure_schema' AIRFLOW_CTX_EXECUTION_DATE='2026-08-23T14:00:00+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='scheduled__2026-08-23T14:00:00+00:00'
+[2026-08-23T15:00:01.073+0000] {taskinstance.py:430} INFO - ::endgroup::
+[2026-08-23T15:00:01.362+0000] {db.py:42} INFO - Running SQL file: /mnt/c/Users/agnes/earthquake_etl/sql/01_create_bronze.sql
+[2026-08-23T15:00:01.373+0000] {base.py:84} INFO - Using connection ID '***_db' for task execution.
+[2026-08-23T15:00:01.380+0000] {sql.py:495} INFO - Running statement: -- =====================================================================
+-- BRONZE LAYER
+-- Raw, untransformed landing zone for USGS earthquake API responses.
+-- One row per GeoJSON "feature" (= one seismic event record as reported
+-- by USGS at ingestion time). The full feature object is preserved
+-- byte-for-byte in `raw_feature` so nothing is ever lost or reshaped
+-- before it lands here -- this is the audit trail / replay source for
+-- every downstream layer.
+-- =====================================================================
+
+CREATE SCHEMA IF NOT EXISTS bronze;
+
+CREATE TABLE IF NOT EXISTS bronze.earthquakes_raw (
+    bronze_id       BIGSERIAL PRIMARY KEY,
+    batch_id        TEXT        NOT NULL,       -- one batch_id per DAG run (dag_id + data_interval)
+    dag_run_id      TEXT        NOT NULL,
+    window_start    TIMESTAMPTZ NOT NULL,        -- data_interval_start used for the API pull
+    window_end      TIMESTAMPTZ NOT NULL,        -- data_interval_end used for the API pull
+    source_url      TEXT        NOT NULL,
+    event_id        TEXT        NOT NULL,        -- USGS feature.id, denormalized for indexing/debugging
+    raw_feature     JSONB       NOT NULL,        -- the untouched GeoJSON Feature object
+    fetched_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- Idempotency guard: re-running (or retrying) the same DAG run for the
+    -- same window must not duplicate rows. A retried task simply upserts
+    -- the same (batch_id, event_id) pair.
+    CONSTRAINT uq_bronze_batch_event UNIQUE (batch_id, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_bronze_event_id ON bronze.earthquakes_raw (event_id);
+CREATE INDEX IF NOT EXISTS ix_bronze_window ON bronze.earthquakes_raw (window_start, window_end);
+CREATE INDEX IF NOT EXISTS ix_bronze_fetched_at ON bronze.earthquakes_raw (fetched_at);
+
+-- Track every ingestion run for observability / lineage (mirrors what you'd
+-- otherwise bolt on with OpenLineage or a custom audit table in production).
+CREATE TABLE IF NOT EXISTS bronze.ingestion_log (
+    batch_id        TEXT PRIMARY KEY,
+    dag_run_id      TEXT        NOT NULL,
+    window_start    TIMESTAMPTZ NOT NULL,
+    window_end      TIMESTAMPTZ NOT NULL,
+    source_url      TEXT        NOT NULL,
+    records_fetched INTEGER     NOT NULL,
+    started_at      TIMESTAMPTZ NOT NULL,
+    finished_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    status          TEXT        NOT NULL DEFAULT 'success'
+);
+, parameters: None
+[2026-08-23T15:00:01.386+0000] {db.py:42} INFO - Running SQL file: /mnt/c/Users/agnes/earthquake_etl/sql/02_create_silver.sql
+[2026-08-23T15:00:01.394+0000] {base.py:84} INFO - Using connection ID '***_db' for task execution.
+[2026-08-23T15:00:01.401+0000] {sql.py:495} INFO - Running statement: -- =====================================================================
+-- SILVER LAYER
+-- Cleaned, normalized, deduplicated earthquake events. One row per
+-- unique USGS event_id. USGS revises events after review (magnitude
+-- gets upgraded/downgraded, location refined), so this table is kept
+-- current via UPSERT keyed on event_id, guarded by `updated_time` so an
+-- out-of-order/backfill run can never overwrite a newer revision with
+-- stale data (see include/transform.py::upsert_silver).
+-- =====================================================================
+
+CREATE SCHEMA IF NOT EXISTS silver;
+
+CREATE TABLE IF NOT EXISTS silver.earthquakes_clean (
+    event_id            TEXT PRIMARY KEY,
+    magnitude           NUMERIC(4,2),
+    mag_type            TEXT,
+    place_raw           TEXT,
+    region              TEXT        NOT NULL,   -- normalized region/place label
+    country             TEXT        NOT NULL,   -- best-effort normalized country/jurisdiction
+    latitude            NUMERIC(9,6) NOT NULL,
+    longitude           NUMERIC(9,6) NOT NULL,
+    depth_km            NUMERIC(7,2),
+    event_time          TIMESTAMPTZ NOT NULL,   -- when the quake occurred
+    updated_time         TIMESTAMPTZ NOT NULL,   -- USGS revision timestamp (idempotency guard)
+    event_type          TEXT        NOT NULL DEFAULT 'earthquake',
+    alert_level          TEXT,                   -- green/yellow/orange/red or NULL
+    tsunami_flag         BOOLEAN     NOT NULL DEFAULT FALSE,
+    significance         INTEGER,                -- USGS "sig" score
+    review_status         TEXT,                   -- reviewed / automatic / deleted
+    felt_reports          INTEGER,
+    source_network        TEXT,
+    is_significant        BOOLEAN     GENERATED ALWAYS AS (COALESCE(magnitude, 0) >= 4.5) STORED,
+    bronze_batch_id        TEXT        NOT NULL,   -- lineage back to the bronze batch that produced this row
+    silver_loaded_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_silver_event_time ON silver.earthquakes_clean (event_time);
+CREATE INDEX IF NOT EXISTS ix_silver_region ON silver.earthquakes_clean (region);
+CREATE INDEX IF NOT EXISTS ix_silver_country ON silver.earthquakes_clean (country);
+CREATE INDEX IF NOT EXISTS ix_silver_significant ON silver.earthquakes_clean (is_significant) WHERE is_significant;
+, parameters: None
+[2026-08-23T15:00:01.405+0000] {db.py:42} INFO - Running SQL file: /mnt/c/Users/agnes/earthquake_etl/sql/03_create_gold.sql
+[2026-08-23T15:00:01.414+0000] {base.py:84} INFO - Using connection ID '***_db' for task execution.
+[2026-08-23T15:00:01.420+0000] {sql.py:495} INFO - Running statement: -- =====================================================================
+-- GOLD LAYER
+-- Time-windowed, BI-ready aggregates. Everything here is rebuilt with
+-- UPSERT keyed on its natural grain, so re-running a DAG run (backfill,
+-- retry, manual clear) recomputes that slice deterministically instead
+-- of double-counting -- the same idempotency property the flight-data
+-- project used for gold.flight_kpis.
+-- =====================================================================
+
+CREATE SCHEMA IF NOT EXISTS gold;
+
+-- 1) Per-region activity for the DAG's own run window (native pipeline grain)
+CREATE TABLE IF NOT EXISTS gold.region_activity_window (
+    window_start        TIMESTAMPTZ NOT NULL,
+    window_end            TIMESTAMPTZ NOT NULL,
+    region                TEXT        NOT NULL,
+    country                TEXT        NOT NULL,
+    event_count            INTEGER     NOT NULL,
+    avg_magnitude          NUMERIC(4,2),
+    max_magnitude          NUMERIC(4,2),
+    min_magnitude          NUMERIC(4,2),
+    significant_event_count INTEGER    NOT NULL DEFAULT 0,   -- magnitude >= 4.5
+    strongest_event_id      TEXT,
+    tsunami_alert_count      INTEGER    NOT NULL DEFAULT 0,
+    avg_depth_km            NUMERIC(7,2),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (window_start, window_end, region, country)
+);
+
+CREATE INDEX IF NOT EXISTS ix_gold_region_window ON gold.region_activity_window (window_start);
+
+-- 2) Global summary per run window -- the single-number KPIs for a BI headline tile
+CREATE TABLE IF NOT EXISTS gold.global_summary_window (
+    window_start          TIMESTAMPTZ NOT NULL,
+    window_end              TIMESTAMPTZ NOT NULL,
+    total_events            INTEGER     NOT NULL,
+    distinct_regions        INTEGER     NOT NULL,
+    avg_magnitude            NUMERIC(4,2),
+    max_magnitude            NUMERIC(4,2),
+    significant_event_count  INTEGER    NOT NULL DEFAULT 0,
+    tsunami_alert_count      INTEGER    NOT NULL DEFAULT 0,
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (window_start, window_end)
+);
+
+-- 3) Seismic "swarm" / congestion-style signal detection: flags a region
+-- whose activity in this window is a significant spike above its own
+-- trailing baseline -- the seismic analogue of the flight project's
+-- "congestion signal" detection.
+CREATE TABLE IF NOT EXISTS gold.swarm_signals (
+    window_start            TIMESTAMPTZ NOT NULL,
+    window_end                TIMESTAMPTZ NOT NULL,
+    region                    TEXT        NOT NULL,
+    country                    TEXT        NOT NULL,
+    event_count                INTEGER     NOT NULL,
+    baseline_avg_count          NUMERIC(6,2) NOT NULL,   -- trailing 7-day same-window-length average
+    spike_ratio                NUMERIC(6,2),             -- event_count / NULLIF(baseline_avg_count, 0); NULL when there's no baseline yet (new/rare region)
+    signal_level                TEXT        NOT NULL,   -- 'normal' | 'elevated' | 'swarm'
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (window_start, window_end, region, country)
+);
+
+-- 4) Daily region rollup -- the historical, ***-ready table BI tools
+-- (Power BI, Metabase, etc.) point at for trend dashboards across days/weeks.
+CREATE TABLE IF NOT EXISTS gold.daily_region_summary (
+    activity_date          DATE        NOT NULL,
+    region                  TEXT        NOT NULL,
+    country                  TEXT        NOT NULL,
+    event_count              INTEGER     NOT NULL,
+    avg_magnitude            NUMERIC(4,2),
+    max_magnitude            NUMERIC(4,2),
+    significant_event_count  INTEGER    NOT NULL DEFAULT 0,
+    tsunami_alert_count      INTEGER    NOT NULL DEFAULT 0,
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (activity_date, region, country)
+);
+
+CREATE INDEX IF NOT EXISTS ix_gold_daily_date ON gold.daily_region_summary (activity_date);
+, parameters: None
+[2026-08-23T15:00:01.422+0000] {python.py:237} INFO - Done. Returned value was: None
+[2026-08-23T15:00:01.423+0000] {taskinstance.py:441} INFO - ::group::Post task execution logs
+[2026-08-23T15:00:01.433+0000] {taskinstance.py:1206} INFO - Marking task as SUCCESS. dag_id=earthquake_medallion_pipeline, task_id=ensure_schema, run_id=scheduled__2026-08-23T14:00:00+00:00, execution_date=20260823T140000, start_date=20260823T150000, end_date=20260823T150001
+[2026-08-23T15:00:01.479+0000] {local_task_job_runner.py:243} INFO - Task exited with return code 0
+[2026-08-23T15:00:01.504+0000] {taskinstance.py:3503} INFO - 1 downstream tasks scheduled from follow-on schedule check
+[2026-08-23T15:00:01.508+0000] {local_task_job_runner.py:222} INFO - ::endgroup::
