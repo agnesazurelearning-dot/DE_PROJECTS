@@ -1,0 +1,161 @@
+
+
+## 🚀 Getting started (WSL, no Docker)
+
+This is the WSL-native equivalent of `cp .env.example .env && docker
+compose up -d` — no Docker involved. Run all of this from a WSL2 Ubuntu
+terminal, inside the project folder. (Airflow doesn't run natively on
+Windows — WSL is the Linux environment it needs.)
+
+### Prerequisites — one-time
+```bash
+mkdir -p dags include sql scripts tests
+```
+
+copy requirements.txt into the folder
+
+Airflow 2.9.3 doesn't support very new Python releases (no published
+constraints file, and some dependency wheels won't build). Pin to Python
+3.11 explicitly rather than trusting whatever `python3` defaults to on a
+fresh WSL image — check first:
+
+```bash
+python3 --version
+```
+
+If that's not 3.11.x, install 3.11 alongside it (this does not remove or
+touch your default `python3`):
+
+```bash
+sudo apt update && sudo apt install -y python3.11 python3.11-venv
+```
+
+If apt reports "unable to locate package python3.11" (can happen on a
+very new Ubuntu release that's dropped it from the default repos), add
+the deadsnakes PPA first, then retry the line above:
+
+agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$ sudo apt update && sudo apt install -y python3.11 python3.11-venv
+[sudo: authenticate] Password:
+Hit:1 http://security.ubuntu.com/ubuntu resolute-security InRelease
+Hit:2 http://archive.ubuntu.com/ubuntu resolute InRelease
+Hit:3 http://archive.ubuntu.com/ubuntu resolute-updates InRelease
+Hit:4 http://archive.ubuntu.com/ubuntu resolute-backports InRelease
+110 packages can be upgraded. Run 'apt list --upgradable' to see them.
+Package python3.11 is not available, but is referred to by another package.
+This may mean that the package is missing, has been obsoleted, or
+is only available from another source
+
+Error: Package 'python3.11' has no installation candidate
+Error: Unable to locate package python3.11-venv
+Error: Couldn't find any package by glob 'python3.11-venv'
+agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$
+
+
+```bash
+sudo apt install -y software-properties-common
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt update
+```
+Then confirm it installed correctly before touching the venv:
+```bash
+python3.11 --version
+# should print: Python 3.11.x
+```
+
+Once that prints 3.11.x, rebuild the venv with it specifically (not bare python3, which will keep grabbing 3.14):
+```bash
+cd /mnt/c/Users/agnes/earthquake_etl
+rm -rf venv
+python3.11 -m venv venv && source venv/bin/activate
+python3 -m ensurepip --upgrade
+
+    output:
+    agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$ python3.11 -m venv venv && source venv/bin/activate
+    python3 -m ensurepip --upgrade
+    Looking in links: /tmp/tmpbz6ajumk
+    Requirement already satisfied: setuptools in ./venv/lib/python3.11/site-packages (79.0.1)
+    Requirement already satisfied: pip in ./venv/lib/python3.11/site-packages (24.0)
+    (venv) agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$
+
+which pip   # must print a path inside .../earthquake_etl/venv/, not /usr/bin/pip eg:/mnt/c/Users/agnes/earthquake_etl/venv/bin/pip
+```
+
+Then Postgres, and the two databases this project needs (one for
+Airflow's own metadata, one for the bronze/silver/gold data):
+
+```bash
+sudo apt install -y postgresql postgresql-contrib
+sudo service postgresql start
+sudo -u postgres psql -c "CREATE USER airflow WITH PASSWORD 'airflow';"
+sudo -u postgres psql -c "CREATE DATABASE airflow_meta OWNER airflow;"
+sudo -u postgres psql -c "CREATE USER analytics WITH PASSWORD 'analytics';"
+sudo -u postgres psql -c "CREATE DATABASE earthquake_analytics OWNER analytics;"
+```
+
+# sanity check -- this must print a path INSIDE this project's venv/ folder,
+# not /usr/bin/pip -- if it doesn't, don't proceed, see troubleshooting below
+```bash
+which pip
+
+AIRFLOW_VERSION=2.9.3
+PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+
+python3 -m pip install "apache-airflow==${AIRFLOW_VERSION}" -r requirements.txt \
+  --constraint "${CONSTRAINT_URL}"
+```
+Once it finishes, confirm it worked with:
+
+```bash
+airflow version
+python3 -m pip show apache-airflow-providers-postgres
+```
+
+(venv) agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$ airflow version
+2.9.3
+(venv) agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$ python3 -m pip show apache-airflow-providers-postgres
+Name: apache-airflow-providers-postgres
+Version: 5.11.2
+Summary: Provider package apache-airflow-providers-postgres for Apache Airflow
+Home-page:
+Author:
+Author-email: Apache Software Foundation <dev@airflow.apache.org>
+License:
+Location: /mnt/c/Users/agnes/earthquake_etl/venv/lib/python3.11/site-packages
+Requires: apache-airflow, apache-airflow-providers-common-sql, psycopg2-binary
+Required-by:
+(venv) agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$
+
+
+              **If `which pip` still doesn't point inside `venv/`:** your venv was
+              created without pip bundled in. Fix it directly rather than fighting
+              PATH order:
+
+              ```bash
+              deactivate
+              rm -rf venv
+              python3.11 -m venv venv
+              source venv/bin/activate
+              python3 -m ensurepip --upgrade
+              which pip   # re-check
+              ```
+
+### Run it
+
+```bash
+source scripts/local_dev_env.sh   # the WSL equivalent of `.env` — points Airflow at this project + Postgres
+airflow db init                   # ONE TIME ONLY the WSL equivalent of the "airflow-init" container
+airflow standalone                # the WSL equivalent of `docker compose up -d` — webserver + scheduler + triggerer, one process
+```
+
+`airflow standalone` prints an admin username/password to the terminal on
+its first run — use that to log in. Every terminal after this first one
+just needs `source venv/bin/activate && source scripts/local_dev_env.sh`
+before running any `airflow ...` command — `airflow db init` is one-time
+only.
+
+Airflow UI: [http://localhost:8080](http://localhost:8080)
+
+cd ~/earthquake_etl   # or wherever your project is
+source scripts/local_dev_env.sh   # so AIRFLOW_HOME is set the same way
+cat "$AIRFLOW_HOME/standalone_admin_password.txt"
