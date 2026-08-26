@@ -1,0 +1,476 @@
+# Earthquake Pulse — Real-Time Seismic Analytics with Airflow
+
+An end-to-end, production-style data engineering project built on **Apache
+Airflow**, ingesting **live global earthquake data** from the USGS public
+API, processing it through a **Bronze → Silver → Gold Medallion
+Architecture**, and landing near-real-time, BI-ready KPIs in PostgreSQL.
+
+This is a same-architecture variation of a flight-tracking Airflow
+project: identical orchestration pattern (idempotent, time-windowed,
+retry-safe, UPSERT-based Medallion pipeline) applied to a different public
+data source. Where that project asked "how is global air traffic
+behaving right now?", this one asks the same question of the planet
+itself: **how is global seismic activity behaving right now?**
+
+> Not a DAG-syntax tutorial. This project is built the way a production
+> pipeline is actually built: idempotent tasks, retries, incremental
+> time-windowed extraction, UPSERT-based analytics tables, and a data
+> quality gate before anything reaches a dashboard.
+
+---
+
+## 🧠 Project Use Case
+
+This project simulates how a seismic monitoring / earth-sciences team
+tracks global earthquake activity **patterns** — not individual quakes —
+to:
+
+- Monitor global seismic event volume trends over time
+- Detect **swarm signals** — a region's activity spiking well above its
+  own trailing baseline (the seismic analogue of "congestion detection")
+- Compare activity across regions and countries, window over window
+- Build a historical, analytics-ready dataset from a live feed, ready for
+  Power BI / Metabase / Superset / any BI tool that speaks Postgres
+
+---
+
+## 🏗️ Architecture
+
+```
+USGS FDSNWS API  ──▶  Bronze (raw JSON)  ──▶  Silver (clean, typed)  ──▶  Gold (BI-ready KPIs)
+  (public, no key)      1 row / event          1 row / event,             4 aggregate tables,
+                         full raw payload       deduped + normalized       UPSERT per run window
+                         preserved in JSONB      on event_id
+```
+
+**Orchestrator:** Apache Airflow 2.9 (LocalExecutor)
+**Storage:** PostgreSQL 16 (separate `airflow_meta` DB for Airflow itself,
+`earthquake_analytics` DB for bronze/silver/gold)
+**Source:** [USGS Earthquake FDSNWS API](https://earthquake.usgs.gov/fdsnws/event/1/) — public, free, no API key required
+**Schedule:** hourly, using Airflow's `data_interval_start` /
+`data_interval_end` as the exact `[start, end)` query window
+
+### Why the FDSNWS `query` endpoint, not the rolling summary feeds
+
+USGS also publishes rolling feeds like `all_hour.geojson` — but those only
+ever answer "what happened in the last N", which makes a reproducible
+backfill impossible. The FDSNWS `query` endpoint accepts explicit
+`starttime`/`endtime`, so every DAG run — including a manual backfill —
+requests an exact, reproducible slice of the catalog. Re-running the same
+data interval returns the same events (modulo USGS revisions, handled via
+`updated` timestamps — see below). That's the idempotency property a real
+pipeline needs and a rolling feed can't give you.
+
+### Medallion layers
+
+| Layer | Table(s) | Grain | What happens here |
+|---|---|---|---|
+| **Bronze** | `bronze.earthquakes_raw` | 1 row per raw GeoJSON feature | Raw API payload landed byte-for-byte in a `JSONB` column. Nothing is reshaped. `ON CONFLICT (batch_id, event_id) DO NOTHING` makes retries safe. |
+| **Silver** | `silver.earthquakes_clean` | 1 row per unique `event_id` | Parses/types every field, normalizes the (genuinely messy) `place` string into `region` + `country`, dedupes. UPSERTed with an `updated_time` guard so a stale reprocess can never overwrite a newer USGS revision. |
+| **Gold** | `gold.region_activity_window`, `gold.global_summary_window`, `gold.swarm_signals`, `gold.daily_region_summary` | Per run window / per day | Pure SQL aggregation, UPSERTed per run window — safe to recompute, never double-counts. |
+
+### The one deliberately messy part: `place` parsing
+
+USGS's free-text `place` field is inconsistent by design (the same way
+flight data forces you to parse messy route/airport strings):
+
+```
+"10km SSW of Ridgecrest, CA"            -> region="Ridgecrest, CA",        country="United States"
+"35 km NNW of Sutton-Alpine, Alaska"    -> region="Sutton-Alpine, Alaska", country="United States"
+"88 km SSE of Kimbe, Papua New Guinea"  -> region="Kimbe, Papua New Guinea", country="Papua New Guinea"
+"Fiji region"                           -> region="Fiji",                 country="Fiji"
+"northern Mid-Atlantic Ridge"           -> region="northern Mid-Atlantic Ridge", country="International Waters / Unclassified"
+```
+
+`include/transform.py::parse_place` handles this with explicit heuristics
+(full US state names *and* abbreviations, oceanic-feature detection,
+territory handling) — and it was validated against a **live pull of the
+current day's actual USGS feed**, not just synthetic examples, during
+development. See `tests/test_transform.py` for the regression cases that
+came out of that validation (e.g. `"Texas"` vs `"CA"` — USGS spells some
+states out and abbreviates others).
+
+---
+
+## 📊 Gold-layer KPIs (what lands in BI)
+
+- **`gold.region_activity_window`** — event count, avg/max/min magnitude,
+  significant-event count (M ≥ 4.5), strongest event, tsunami-alert count,
+  avg depth — per region, per run window.
+- **`gold.global_summary_window`** — single-number headline tiles: total
+  events, distinct regions active, avg/max magnitude, significant &
+  tsunami-alert counts — per run window.
+- **`gold.swarm_signals`** — flags each region `normal` / `elevated` /
+  `swarm` by comparing this window's event count to that region's trailing
+  7-day baseline for windows of the same length.
+- **`gold.daily_region_summary`** — daily rollup by region/country, the
+  table a Power BI trend dashboard points at for history.
+
+---
+
+## 🔁 What makes this "production", not "tutorial"
+
+- **Idempotent by construction** — every write is `INSERT ... ON CONFLICT
+  ... DO UPDATE`, keyed on a natural key. Rerun any DAG run, retry any
+  task, or backfill any historical window, and you get the same result —
+  never duplicates.
+- **Task-level retries** — 3 retries per task with exponential backoff
+  (`default_args` in the DAG), so a transient USGS API hiccup doesn't fail
+  the whole run.
+- **Revision-safe upserts** — USGS revises events after human review
+  (magnitude gets upgraded/downgraded). Silver only overwrites a row when
+  the incoming record's `updated_time` is actually newer.
+- **Explicit task dependencies** — `ensure_schema → extract_bronze →
+  transform_silver → build_gold → data_quality_check`, each consuming the
+  previous task's return value via TaskFlow XCom, not shared global state.
+- **A data quality gate before BI** — `data_quality_check` fails the run
+  loudly if the gold layer contains implausible values, rather than
+  silently shipping bad data downstream.
+- **Full lineage** — every bronze batch is logged in
+  `bronze.ingestion_log` (source URL, window, record count, timing), and
+  every silver row carries its `bronze_batch_id` back.
+
+---
+
+## 🚀 Getting started (WSL, no Docker)
+
+This is the WSL-native equivalent of `cp .env.example .env && docker
+compose up -d` — no Docker involved. Run all of this from a WSL2 Ubuntu
+terminal, inside the project folder. (Airflow doesn't run natively on
+Windows — WSL is the Linux environment it needs.)
+
+### Prerequisites — one-time
+```bash
+mkdir -p dags include sql scripts tests
+```
+
+copy requirements.txt into the folder
+
+Airflow 2.9.3 doesn't support very new Python releases (no published
+constraints file, and some dependency wheels won't build). Pin to Python
+3.11 explicitly rather than trusting whatever `python3` defaults to on a
+fresh WSL image — check first:
+
+```bash
+python3 --version
+```
+
+If that's not 3.11.x, install 3.11 alongside it (this does not remove or
+touch your default `python3`):
+
+```bash
+sudo apt update && sudo apt install -y python3.11 python3.11-venv
+```
+
+If apt reports "unable to locate package python3.11" (can happen on a
+very new Ubuntu release that's dropped it from the default repos), add
+the deadsnakes PPA first, then retry the line above:
+
+agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$ sudo apt update && sudo apt install -y python3.11 python3.11-venv
+[sudo: authenticate] Password:
+Hit:1 http://security.ubuntu.com/ubuntu resolute-security InRelease
+Hit:2 http://archive.ubuntu.com/ubuntu resolute InRelease
+Hit:3 http://archive.ubuntu.com/ubuntu resolute-updates InRelease
+Hit:4 http://archive.ubuntu.com/ubuntu resolute-backports InRelease
+110 packages can be upgraded. Run 'apt list --upgradable' to see them.
+Package python3.11 is not available, but is referred to by another package.
+This may mean that the package is missing, has been obsoleted, or
+is only available from another source
+
+Error: Package 'python3.11' has no installation candidate
+Error: Unable to locate package python3.11-venv
+Error: Couldn't find any package by glob 'python3.11-venv'
+agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$
+
+
+```bash
+sudo apt install -y software-properties-common
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt update
+```
+Then confirm it installed correctly before touching the venv:
+```bash
+python3.11 --version
+# should print: Python 3.11.x
+```
+
+Once that prints 3.11.x, rebuild the venv with it specifically (not bare python3, which will keep grabbing 3.14):
+```bash
+cd /mnt/c/Users/agnes/earthquake_etl
+rm -rf venv
+python3.11 -m venv venv && source venv/bin/activate
+python3 -m ensurepip --upgrade
+
+    output:
+    agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$ python3.11 -m venv venv && source venv/bin/activate
+    python3 -m ensurepip --upgrade
+    Looking in links: /tmp/tmpbz6ajumk
+    Requirement already satisfied: setuptools in ./venv/lib/python3.11/site-packages (79.0.1)
+    Requirement already satisfied: pip in ./venv/lib/python3.11/site-packages (24.0)
+    (venv) agnes@LAPTOP-6BTBCN71:/mnt/c/Users/agnes/earthquake_etl$
+
+which pip   # must print a path inside .../earthquake_etl/venv/, not /usr/bin/pip eg:/mnt/c/Users/agnes/earthquake_etl/venv/bin/pip
+```
+
+Then Postgres, and the two databases this project needs (one for
+Airflow's own metadata, one for the bronze/silver/gold data):
+
+```bash
+sudo apt install -y postgresql postgresql-contrib
+sudo service postgresql start
+sudo -u postgres psql -c "CREATE USER airflow WITH PASSWORD 'airflow';"
+sudo -u postgres psql -c "CREATE DATABASE airflow_meta OWNER airflow;"
+sudo -u postgres psql -c "CREATE USER analytics WITH PASSWORD 'analytics';"
+sudo -u postgres psql -c "CREATE DATABASE earthquake_analytics OWNER analytics;"
+```
+
+# sanity check -- this must print a path INSIDE this project's venv/ folder,
+# not /usr/bin/pip -- if it doesn't, don't proceed, see troubleshooting below
+```bash
+which pip
+
+AIRFLOW_VERSION=2.9.3
+PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+
+python3 -m pip install "apache-airflow==${AIRFLOW_VERSION}" -r requirements.txt \
+  --constraint "${CONSTRAINT_URL}"
+```
+
+              **If `which pip` still doesn't point inside `venv/`:** your venv was
+              created without pip bundled in. Fix it directly rather than fighting
+              PATH order:
+
+              ```bash
+              deactivate
+              rm -rf venv
+              python3.11 -m venv venv
+              source venv/bin/activate
+              python3 -m ensurepip --upgrade
+              which pip   # re-check
+              ```
+
+### Run it
+
+```bash
+source scripts/local_dev_env.sh   # the WSL equivalent of `.env` — points Airflow at this project + Postgres
+airflow db init                   # the WSL equivalent of the "airflow-init" container
+airflow standalone                # the WSL equivalent of `docker compose up -d` — webserver + scheduler + triggerer, one process
+```
+
+`airflow standalone` prints an admin username/password to the terminal on
+its first run — use that to log in. Every terminal after this first one
+just needs `source venv/bin/activate && source scripts/local_dev_env.sh`
+before running any `airflow ...` command — `airflow db init` is one-time
+only.
+
+Airflow UI: [http://localhost:8080](http://localhost:8080)
+
+The DAG `earthquake_medallion_pipeline` is scheduled `@hourly` and starts
+paused — unpause it in the UI, then hit **Trigger DAG** for an immediate
+first run rather than waiting for the schedule. Before that first run,
+finish the two UI steps in "Fully UI-driven local setup" below (adding
+the `analytics_db` connection and the two tuning Variables) — without
+those the DAG will fail on its first task.
+
+### Connect a BI tool
+
+Point Power BI / Metabase / Superset / DBeaver at:
+
+```
+host:     localhost
+port:     5432
+database: earthquake_analytics
+schema:   gold
+user/pw:  analytics / analytics   (or whatever you used above)
+```
+
+### Backfill historical data
+
+```bash
+airflow dags backfill earthquake_medallion_pipeline \
+  --start-date 2026-08-01 --end-date 2026-08-07
+```
+
+Every backfilled hour lands correctly and idempotently — running it twice
+does not duplicate rows anywhere in bronze, silver, or gold.
+
+### Prefer Docker instead?
+
+The project still ships a working `docker-compose.yml` / `Dockerfile` /
+`.env.example` for that path:
+
+```bash
+cp .env.example .env
+docker compose up -d
+```
+
+Same DAG, same Postgres schema, same UI at `localhost:8080` — pick
+whichever fits your machine. Nothing below this point differs between
+the two.
+
+### Run the unit tests (no Docker required)
+
+```bash
+python3 -m pip install pytest requests
+python3 -m pytest tests/ -v
+```
+
+### Test ingestion in isolation, no Airflow/DB needed
+
+```bash
+python3 scripts/run_ingestion_standalone.py --hours-ago 2
+```
+
+Fetches a live window straight from USGS and prints what each event
+normalizes to. Useful as a 5-second pre-flight check before a demo, or
+while iterating on `include/transform.py`.
+
+---
+
+## 🖱️ Fully UI-driven local setup (no Docker)
+
+This runs everything through the Airflow UI wherever Airflow actually
+allows it. One honest caveat up front: Airflow's **own** metadata database
+and executor have to be set *before* the UI exists (the UI is served
+*by* Airflow, so it can't configure the thing that starts it) — that
+one piece is a few environment variables via `scripts/local_dev_env.sh`.
+Everything downstream of that — the pipeline's own database connection,
+its tuning knobs, triggering runs, reading logs, retrying tasks — is
+point-and-click from the browser.
+
+**1 & 2. Install Airflow and start it** — this is exactly the "Getting
+started (WSL, no Docker)" section above: install Postgres + Airflow once,
+then `source scripts/local_dev_env.sh && airflow db init && airflow
+standalone`. Open [http://localhost:8080](http://localhost:8080) and log
+in with the admin credentials `airflow standalone` printed on first run.
+
+**3. Add the database connection — Admin > Connections > +**
+
+| Field | Value |
+|---|---|
+| Connection Id | `analytics_db` |
+| Connection Type | `Postgres` |
+| Host | `localhost` |
+| Schema | `earthquake_analytics` |
+| Login | `analytics` |
+| Password | `analytics` |
+| Port | `5432` |
+
+This is exactly the connection `include/db.py` looks up by id — nothing
+in the DAG or Python code needs to change.
+
+**4. Add the two tuning Variables — Admin > Variables > +**
+
+| Key | Value |
+|---|---|
+| `usgs_min_magnitude` | `0` |
+| `swarm_spike_ratio` | `2.0` |
+
+**5. Run it from the DAG list**
+
+Find `earthquake_medallion_pipeline`, flip its pause toggle off, then hit
+the ▶ **Trigger DAG** button for an immediate run instead of waiting for
+the hourly schedule. Click into the run's **Grid** view — each square is
+a task; click any square to open its log panel right there in the
+browser (no `docker logs` / SSH needed). A failed task can be retried,
+or cleared, or marked success, all from that same panel.
+
+One real limitation worth knowing: a true historical **backfill**
+(`airflow dags backfill --start-date ... --end-date ...`) is CLI-only in
+Airflow 2.9 — there's no UI button for it. For a demo this doesn't matter
+(you're triggering forward-looking runs), it only matters if you later
+want to reprocess a week of history.
+
+---
+
+## 🎬 30-minute live demo runbook
+
+Assuming Airflow is already installed (step 1 above done ahead of time):
+
+| Time | What you do | What it shows |
+|---|---|---|
+| 0–5 min | `source scripts/local_dev_env.sh && airflow standalone` in one terminal | Airflow booting on real Postgres, LocalExecutor |
+| 5–8 min | Log in, Admin > Connections > add `analytics_db` | Zero-code data connection setup |
+| 8–10 min | Admin > Variables > add the two tuning knobs | Runtime config with no redeploy |
+| 10–12 min | Unpause `earthquake_medallion_pipeline`, hit Trigger | Kicking off a real pipeline run |
+| 12–18 min | Grid view, click through `ensure_schema → extract_bronze → transform_silver → build_gold → data_quality_check` as they go green, open a couple of task logs live | Real orchestration: retries config, task dependencies, actual USGS payload sizes in the logs |
+| 18–23 min | `psql -U analytics -d earthquake_analytics -c "SELECT * FROM gold.swarm_signals ORDER BY updated_at DESC LIMIT 10;"` | The actual BI-ready output — this is the "so what" moment |
+| 23–27 min | Trigger a second run, show it's still fast/clean (idempotency) | Rerunning doesn't duplicate or break anything |
+| 27–30 min | Q&A buffer | — |
+
+If you want a true zero-network fallback in case USGS or your wifi is
+uncooperative mid-demo: run `python3 scripts/run_ingestion_standalone.py
+--save sample.json` beforehand as a sanity check, and keep the terminal
+output from that run as a backup talking point.
+
+---
+
+## 📁 Project structure
+
+```
+.
+├── dags/
+│   └── earthquake_medallion_pipeline.py   # the DAG
+├── include/
+│   ├── usgs_client.py     # USGS API client (retries, exact time windows)
+│   ├── db.py               # Postgres helpers (PostgresHook wrapper)
+│   ├── transform.py        # bronze -> silver parsing/normalization logic
+│   └── gold_aggregations.py  # silver -> gold UPSERT SQL
+├── sql/
+│   ├── 01_create_bronze.sql
+│   ├── 02_create_silver.sql
+│   └── 03_create_gold.sql
+├── scripts/
+│   ├── init-analytics-db.sh          # Docker path: creates the analytics DB/role
+│   ├── local_dev_env.sh              # non-Docker path: source before `airflow ...`
+│   └── run_ingestion_standalone.py   # test USGS ingestion with no Airflow/DB at all
+├── tests/
+│   └── test_transform.py      # unit tests, incl. live-data regressions
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+└── .env.example
+```
+
+`sql_bigquery/` and `include/bq_client.py` are a **parked, not-yet-wired-up**
+BigQuery variant — see "BigQuery as a future upgrade" below.
+
+---
+
+## 🧩 Extending this project
+
+- **BigQuery as a future upgrade**: `sql_bigquery/*.sql` and
+  `include/bq_client.py` sketch out what swapping the analytics warehouse
+  from Postgres to BigQuery looks like — three datasets (bronze/silver/gold)
+  instead of three schemas, `MERGE` statements instead of `INSERT ... ON
+  CONFLICT` (BigQuery has no such syntax), partitioning/clustering instead
+  of indexes. It's intentionally **not** wired into a DAG yet: BigQuery has
+  no local emulator, so unlike everything else in this project, that code
+  couldn't be proven against a live database before being handed to you —
+  and getting it demo-ready needs real GCP setup time (service account,
+  IAM, a live project) that a first walkthrough shouldn't be gated on. Once
+  you've got the Postgres version running end to end and want to take this
+  on, ask and we can wire it into a second DAG and validate it against your
+  actual BigQuery project.
+- **Swap Postgres for a lakehouse layout**: land Bronze as partitioned
+  Parquet in S3/MinIO instead of a JSONB table, keep Silver/Gold in
+  Postgres (or DuckDB) — same DAG shape, different storage adapter in
+  `include/db.py`.
+- **dbt for the Silver → Gold layer**: the SQL in
+  `include/gold_aggregations.py` is already written as plain, testable SQL
+  — a natural next step is moving it into a dbt project and having Airflow
+  trigger `dbt run` instead of raw psycopg2 calls.
+- **Alerting**: wire `gold.swarm_signals` rows with `signal_level =
+  'swarm'` to a Slack/PagerDuty task via Airflow's callback hooks —
+  same shape as alerting on a flight-congestion signal.
+- **Great Expectations**: replace the hand-rolled `data_quality_check`
+  task with a Great Expectations suite for richer, declarative DQ rules.
+
+---
+
+## 📚 Data source
+
+[USGS Earthquake Hazards Program — FDSNWS Event API](https://earthquake.usgs.gov/fdsnws/event/1/)
+Public, free, no authentication required. Field reference:
+[GeoJSON summary format docs](https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php).
