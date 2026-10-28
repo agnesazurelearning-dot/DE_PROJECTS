@@ -1,0 +1,11 @@
+payment_id,order_id,payment_method,amount_cents
+1,101,credit_card,2500
+2,102,credit_card,1899
+3,103,gift_card,500
+4,104,credit_card,3200
+5,105,credit_card,0
+6,106,paypal,4500
+7,107,credit_card,1200
+8,108,debit_card,2750
+9,109,paypal,900
+10,110,credit_card,6100

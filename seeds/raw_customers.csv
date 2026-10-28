@@ -1,0 +1,9 @@
+customer_id,first_name,last_name,email
+1,Emma,Watson,emma.w@example.com
+2,Liam,Chen,liam.chen@example.com
+3,Olivia,Brown,olivia.b@example.com
+4,Noah,Patel,noah.patel@example.com
+5,Ava,Garcia,ava.garcia@example.com
+6,Ethan,Kim,ethan.kim@example.com
+7,,Smith,jsmith@example.com
+8,Sophia,Lee,sophia.lee@example.com
